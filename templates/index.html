@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sony WH-1000XM6 Controller</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">
+                    <span class="logo-text">SONY</span>
+                    <span class="model-text">WH-1000XM6</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <span class="status-dot" id="statusDot"></span>
+                <span class="status-text" id="statusText">Disconnected</span>
+                <button class="btn btn-connect" id="connectBtn" onclick="toggleConnection()">Connect</button>
+            </div>
+        </header>
+
+        <!-- Battery Card -->
+        <section class="card" id="batteryCard">
+            <div class="card-header">
+                <h2>Battery</h2>
+            </div>
+            <div class="battery-display">
+                <div class="battery-icon">
+                    <div class="battery-body">
+                        <div class="battery-fill" id="batteryFill"></div>
+                    </div>
+                    <div class="battery-tip"></div>
+                </div>
+                <div class="battery-info">
+                    <span class="battery-percent" id="batteryPercent">--%</span>
+                    <span class="battery-charging" id="batteryCharging" style="display:none">Charging</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ANC Card -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Noise Control</h2>
+            </div>
+            <div class="anc-modes">
+                <button class="anc-btn" data-mode="off" onclick="setAnc('off')">
+                    <span class="anc-icon">&#x2715;</span>
+                    <span>Off</span>
+                </button>
+                <button class="anc-btn" data-mode="nc" onclick="setAnc('nc')">
+                    <span class="anc-icon">&#x1F6E1;</span>
+                    <span>Noise Cancelling</span>
+                </button>
+                <button class="anc-btn" data-mode="ambient" onclick="setAnc('ambient')">
+                    <span class="anc-icon">&#x1F442;</span>
+                    <span>Ambient Sound</span>
+                </button>
+            </div>
+            <div class="anc-options" id="ambientOptions" style="display:none">
+                <div class="slider-group">
+                    <label>Ambient Level</label>
+                    <div class="slider-row">
+                        <input type="range" min="1" max="20" value="10" id="ambientLevel" oninput="updateAmbientLabel()">
+                        <span class="slider-value" id="ambientValue">10</span>
+                    </div>
+                </div>
+                <div class="toggle-row">
+                    <label>Focus on Voice</label>
+                    <label class="toggle">
+                        <input type="checkbox" id="focusVoice" onchange="setAnc('ambient')">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+        </section>
+
+        <!-- EQ Card (not supported on XM6 via RFCOMM — use Sony app) -->
+        <!--
+        <section class="card">
+            <div class="card-header">
+                <h2>Equalizer</h2>
+            </div>
+            <div class="eq-grid">
+                <button class="eq-btn active" data-preset="off" onclick="setEq('off')">Off</button>
+                <button class="eq-btn" data-preset="rock" onclick="setEq('rock')">Rock</button>
+            </div>
+        </section>
+        -->
+
+        <!-- Volume Card -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Volume</h2>
+            </div>
+            <div class="slider-group">
+                <div class="slider-row">
+                    <span class="slider-icon">&#x1F508;</span>
+                    <input type="range" min="0" max="30" value="15" id="volumeSlider" oninput="updateVolumeLabel()" onchange="setVolume()">
+                    <span class="slider-icon">&#x1F50A;</span>
+                    <span class="slider-value" id="volumeValue">15</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Playback Card -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Playback</h2>
+            </div>
+            <div class="playback-controls">
+                <button class="playback-btn" onclick="sendPlayback('prev')" title="Previous">&#x23EE;</button>
+                <button class="playback-btn playback-main" onclick="sendPlayback('play')" title="Play">&#x23EF;</button>
+                <button class="playback-btn" onclick="sendPlayback('next')" title="Next">&#x23ED;</button>
+            </div>
+        </section>
+
+        <!-- Toggles Card -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Features</h2>
+            </div>
+            <div class="toggle-row">
+                <div>
+                    <label>DSEE Extreme</label>
+                    <p class="toggle-desc">AI audio upscaling</p>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" id="dseeToggle" onchange="setDsee()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="toggle-row">
+                <div>
+                    <label>Speak-to-Chat</label>
+                    <p class="toggle-desc">Auto-pause when speaking</p>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" id="stcToggle" onchange="setSpeakToChat()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
