@@ -1,16 +1,30 @@
 """Sony WH-1000XM6 Web Controller — Entry Point.
 
 Architecture:
-    Main thread  → IOBluetooth + NSRunLoop (required by macOS)
+    Main thread  → NSStatusBar menu + IOBluetooth + NSRunLoop
     Daemon thread → Flask HTTP server
 
 ALL Bluetooth operations (connect, disconnect, send_command) must run on
-the main thread. Flask routes schedule them via run_on_main().
+the main thread. Flask routes and menu callbacks schedule them via
+run_on_main() / bt_queue.
 """
 
 import logging
+import os
 import queue
 import threading
+import webbrowser
+
+import objc
+from AppKit import (
+    NSApplication,
+    NSImage,
+    NSMenu,
+    NSMenuItem,
+    NSObject,
+    NSStatusBar,
+    NSVariableStatusItemLength,
+)
 
 from flask import Flask, jsonify, render_template, request
 
@@ -235,7 +249,7 @@ def api_playback():
 
     # Use Spotify AppleScript API, fall back to generic media player
     scripts = {
-        "play": 'tell application "Spotify" to play',
+        "play": 'tell application "Spotify" to playpause',
         "pause": 'tell application "Spotify" to pause',
         "next": 'tell application "Spotify" to next track',
         "prev": 'tell application "Spotify" to previous track',
@@ -253,7 +267,7 @@ def api_playback():
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Flask server
 # ---------------------------------------------------------------------------
 
 def run_flask():
@@ -261,27 +275,246 @@ def run_flask():
     app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False)
 
 
-def main():
-    """Main thread: start Flask in background, then run NSRunLoop.
+# ---------------------------------------------------------------------------
+# macOS Menu Bar (NSStatusBar)
+# ---------------------------------------------------------------------------
 
-    The NSRunLoop is required for IOBluetooth delegate callbacks.
-    We also poll bt_queue to execute BT operations scheduled from Flask.
+_quit_requested = False
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resource_path(filename):
+    """Locate a resource file (works as script and inside .app bundle)."""
+    for d in [os.path.join(_BASE_DIR, "resources"), _BASE_DIR]:
+        p = os.path.join(d, filename)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+class MenuBarDelegate(NSObject):
+    """Handles NSStatusBar menu item callbacks."""
+
+    def openWebUI_(self, sender):
+        webbrowser.open("http://localhost:5050")
+
+    def toggleConnection_(self, sender):
+        if connector.connected:
+            bt_queue.put(lambda: connector.disconnect())
+        else:
+            def _connect():
+                devices = connector.discover_sony_devices()
+                if devices:
+                    if connector.connect(devices[0]["address"]):
+                        connector.send_command(build_battery_inquiry())
+                        connector.send_command(build_nc_asm_get())
+                        connector.send_command(build_volume_get())
+                        connector.send_command(build_dsee_get())
+                        connector.send_command(build_speak_to_chat_get())
+            bt_queue.put(_connect)
+
+    def ancOff_(self, sender):
+        try:
+            log.info("Menu: ANC Off")
+            payload = build_anc_command_xm6(AncMode.OFF)
+            bt_queue.put(lambda: connector.send_command(payload))
+        except Exception:
+            log.exception("ancOff_ failed")
+
+    def ancNc_(self, sender):
+        try:
+            log.info("Menu: Noise Cancelling")
+            payload = build_anc_command_xm6(AncMode.NOISE_CANCELLING)
+            bt_queue.put(lambda: connector.send_command(payload))
+        except Exception:
+            log.exception("ancNc_ failed")
+
+    def ancAmbient_(self, sender):
+        try:
+            log.info("Menu: Ambient Sound")
+            payload = build_anc_command_xm6(AncMode.AMBIENT_SOUND)
+            bt_queue.put(lambda: connector.send_command(payload))
+        except Exception:
+            log.exception("ancAmbient_ failed")
+
+    def playPrev_(self, sender):
+        import subprocess
+        subprocess.Popen(["osascript", "-e", 'tell application "Spotify" to previous track'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def playPause_(self, sender):
+        import subprocess
+        subprocess.Popen(["osascript", "-e", 'tell application "Spotify" to playpause'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def playNext_(self, sender):
+        import subprocess
+        subprocess.Popen(["osascript", "-e", 'tell application "Spotify" to next track'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def quitApp_(self, sender):
+        global _quit_requested
+        _quit_requested = True
+
+    @objc.python_method
+    def update_status(self, status_line, connect_item):
+        """Refresh the menu bar status text."""
+        if connector.connected:
+            bat = connector.battery_level
+            mode = (
+                connector.anc_mode.upper()
+                if connector.anc_mode != "unknown"
+                else "-"
+            )
+            chrg = " chrg" if connector.battery_charging else ""
+            status_line.setTitle_(f"Battery: {bat}%{chrg} | {mode}")
+            connect_item.setTitle_("Disconnect")
+        else:
+            status_line.setTitle_("Not connected")
+            connect_item.setTitle_("Connect")
+
+
+def setup_menu_bar():
+    """Initialize NSApplication and create the menu bar status item.
+
+    Returns (delegate, status_line_item, connect_item).
     """
-    from Foundation import NSDate, NSRunLoop
-    from CoreFoundation import CFRunLoopRunInMode, kCFRunLoopDefaultMode
+    ns_app = NSApplication.sharedApplication()
+    ns_app.setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory
 
+    delegate = MenuBarDelegate.alloc().init()
+
+    status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+        NSVariableStatusItemLength
+    )
+
+    # Try to load template icon; fall back to text
+    icon_path = _resource_path("icon.png")
+    if icon_path:
+        icon = NSImage.alloc().initWithContentsOfFile_(icon_path)
+        icon.setTemplate_(True)
+        icon.setSize_((22, 22))
+        status_item.button().setImage_(icon)
+    else:
+        status_item.button().setTitle_("XM6")
+
+    # -- Dropdown menu --
+    menu = NSMenu.alloc().init()
+
+    status_line = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Not connected", None, ""
+    )
+    status_line.setEnabled_(False)
+    menu.addItem_(status_line)
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    # -- ANC / Ambient controls --
+    anc_off_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "ANC Off", "ancOff:", ""
+    )
+    anc_off_item.setTarget_(delegate)
+    menu.addItem_(anc_off_item)
+
+    anc_nc_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Noise Cancelling", "ancNc:", ""
+    )
+    anc_nc_item.setTarget_(delegate)
+    menu.addItem_(anc_nc_item)
+
+    anc_ambient_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Ambient Sound", "ancAmbient:", ""
+    )
+    anc_ambient_item.setTarget_(delegate)
+    menu.addItem_(anc_ambient_item)
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    # -- Playback controls --
+    prev_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "⏮ Previous", "playPrev:", ""
+    )
+    prev_item.setTarget_(delegate)
+    menu.addItem_(prev_item)
+
+    playpause_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "⏯ Play / Pause", "playPause:", ""
+    )
+    playpause_item.setTarget_(delegate)
+    menu.addItem_(playpause_item)
+
+    next_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "⏭ Next", "playNext:", ""
+    )
+    next_item.setTarget_(delegate)
+    menu.addItem_(next_item)
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    open_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Open Web UI", "openWebUI:", ""
+    )
+    open_item.setTarget_(delegate)
+    menu.addItem_(open_item)
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    connect_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Connect", "toggleConnection:", ""
+    )
+    connect_item.setTarget_(delegate)
+    menu.addItem_(connect_item)
+    menu.addItem_(NSMenuItem.separatorItem())
+
+    quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+        "Quit", "quitApp:", "q"
+    )
+    quit_item.setTarget_(delegate)
+    menu.addItem_(quit_item)
+
+    status_item.setMenu_(menu)
+
+    return delegate, status_line, connect_item
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    """Main thread: menu bar + Flask server + event loop.
+
+    Uses NSApplication.nextEventMatchingMask… + sendEvent_ to pump both
+    AppKit events (menu clicks) and run-loop sources (IOBluetooth
+    callbacks) in a single loop.
+    """
+    from Foundation import NSDate, NSDefaultRunLoopMode
+
+    # Menu bar icon
+    delegate, status_line, connect_item = setup_menu_bar()
+    ns_app = NSApplication.sharedApplication()
+    log.info("Menu bar icon ready")
+
+    # Flask web server (daemon thread)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     log.info("Flask server started on http://127.0.0.1:5050")
-    log.info("Open your browser to control the WH-1000XM6")
 
-    # Main run loop: process IOBluetooth callbacks + our BT queue
+    log.info("Web UI available at http://localhost:5050")
+
+    tick = 0
+    NSAnyEventMask = 0xFFFFFFFF
+
     try:
-        while True:
-            # Run the NSRunLoop for a short interval to process BT callbacks
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, False)
+        while not _quit_requested:
+            # Pump AppKit events (menus, clicks) — also runs the
+            # CFRunLoop internally, which processes IOBluetooth callbacks.
+            event = ns_app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                NSAnyEventMask,
+                NSDate.dateWithTimeIntervalSinceNow_(0.05),
+                NSDefaultRunLoopMode,
+                True,
+            )
+            if event is not None:
+                ns_app.sendEvent_(event)
 
-            # Process any queued BT operations from Flask thread
+            # Execute queued BT operations from Flask / menu bar
             while not bt_queue.empty():
                 try:
                     fn = bt_queue.get_nowait()
@@ -291,10 +524,18 @@ def main():
                 except Exception:
                     log.exception("Error in queued BT operation")
 
+            # Update menu bar status (~once per second)
+            tick += 1
+            if tick % 20 == 0:
+                delegate.update_status(status_line, connect_item)
+
     except KeyboardInterrupt:
         log.info("Shutting down...")
-        if connector.connected:
-            connector.disconnect()
+
+    # Cleanup
+    if connector.connected:
+        connector.disconnect()
+    log.info("Goodbye.")
 
 
 if __name__ == "__main__":

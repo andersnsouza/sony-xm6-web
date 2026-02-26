@@ -2,3 +2,4 @@ flask>=3.1.0
 pyobjc-core>=10.0
 pyobjc-framework-IOBluetooth>=10.0
 pyobjc-framework-Cocoa>=10.0
+py2app>=0.28
